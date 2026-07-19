@@ -1,1 +1,42 @@
-inicio
+<div class="container">
+  <h1>YOLO Detector Local</h1>
+
+  <div class="controls">
+    <div class="control-group">
+      <label class="btn-upload">
+        Seleccionar Imagen
+        <input type="file" (change)="onFileSelected($event)" accept="image/*" />
+      </label>
+    </div>
+
+    <div class="control-group">
+      <label for="modelSelect">Modelo:</label>
+      <select id="modelSelect" [value]="selectedModel" (change)="onModelChange($event)">
+        @for (m of models; track m) {
+          <option [value]="m">{{ m }}</option>
+        }
+      </select>
+    </div>
+  </div>
+
+  <div class="status-bar">
+    <span [class.loading]="isLoading || processing">{{ status }}</span>
+  </div>
+
+  @if (imageUrl) {
+    <div class="image-container">
+      <img
+        #sourceImage
+        [src]="imageUrl"
+        (load)="onImageLoad()"
+        alt="Input"
+        crossorigin="anonymous"
+      />
+      <canvas #imageCanvas class="overlay-canvas"></canvas>
+    </div>
+  } @else {
+    <div class="placeholder">
+      <p>Selecciona una imagen para ejecutar detección con YOLO.</p>
+    </div>
+  }
+</div>

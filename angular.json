@@ -22,6 +22,16 @@
               {
                 "glob": "**/*",
                 "input": "public"
+              },
+              {
+                "glob": "**/*",
+                "input": "node_modules/@litertjs/core/wasm",
+                "output": "/wasm"
+              },
+              {
+                "glob": "**/*",
+                "input": "src/public",
+                "output": "/models"
               }
             ],
             "styles": [
