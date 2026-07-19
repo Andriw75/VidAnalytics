@@ -17,6 +17,12 @@
         }
       </select>
     </div>
+
+    @if (imageUrl && !isLoading) {
+      <button class="btn-infer" (click)="runInference()" [disabled]="processing">
+        {{ processing ? 'Procesando...' : 'Inferencia' }}
+      </button>
+    }
   </div>
 
   <div class="status-bar">
@@ -28,12 +34,34 @@
       <img
         #sourceImage
         [src]="imageUrl"
-        (load)="onImageLoad()"
         alt="Input"
         crossorigin="anonymous"
       />
       <canvas #imageCanvas class="overlay-canvas"></canvas>
+      @if (processing) {
+        <div class="inference-overlay">
+          <div class="spinner"></div>
+          <span>Ejecutando inferencia...</span>
+        </div>
+      }
     </div>
+
+    @if (inferenceDone) {
+      <div class="results">
+        <div class="results-header">
+          Tiempo: <strong>{{ (inferenceTime! / 1000).toFixed(2) }}s</strong> &nbsp;|&nbsp; Detecciones: <strong>{{ detections.length }}</strong>
+        </div>
+        @if (detections.length > 0) {
+          <div class="results-list">
+            @for (d of detections; track $index) {
+              <span class="tag">{{ cocoClass(d.classId) }} <em>{{ (d.confidence * 100).toFixed(1) }}%</em></span>
+            }
+          </div>
+        } @else {
+          <p class="no-dets">No se detectaron objetos.</p>
+        }
+      </div>
+    }
   } @else {
     <div class="placeholder">
       <p>Selecciona una imagen para ejecutar detección con YOLO.</p>

@@ -45,6 +45,8 @@ export class App implements AfterViewInit {
   isLoading = true;
   detections: Detection[] = [];
   processing = false;
+  inferenceTime: number | null = null;
+  inferenceDone = false;
 
   private model: CompiledModel | null = null;
 
@@ -90,11 +92,10 @@ export class App implements AfterViewInit {
     this.isLoading = true;
     this.status = 'Cargando modelo...';
     this.detections = [];
+    this.inferenceDone = false;
+    this.inferenceTime = null;
     this.cdr.detectChanges();
     await this.loadModel();
-    if (this.imageUrl && this.model) {
-      await this.processImage();
-    }
   }
 
   async onFileSelected(event: Event) {
@@ -104,19 +105,24 @@ export class App implements AfterViewInit {
       if (this.imageUrl) URL.revokeObjectURL(this.imageUrl);
       this.imageUrl = URL.createObjectURL(file);
       this.detections = [];
+      this.inferenceDone = false;
+      this.inferenceTime = null;
       this.cdr.detectChanges();
     }
   }
 
-  async onImageLoad() {
+  async runInference() {
     if (!this.model || !this.imageUrl) return;
-    await this.processImage();
-  }
+    if (this.processing) return;
 
-  private async processImage() {
-    if (!this.model) return;
     this.processing = true;
-    this.status = 'Procesando imagen con el modelo...';
+    this.inferenceDone = false;
+    this.inferenceTime = null;
+    this.status = 'Ejecutando inferencia...';
+    this.cdr.detectChanges();
+    await new Promise(r => setTimeout(r, 0));
+
+    const start = performance.now();
 
     try {
       const img = this.imageRef.nativeElement;
@@ -145,8 +151,10 @@ export class App implements AfterViewInit {
         pad
       );
 
+      this.inferenceTime = performance.now() - start;
       this.drawDetections();
-      this.status = `Detectados ${this.detections.length} objeto(s).`;
+      this.inferenceDone = true;
+      this.status = `Inferencia completada en ${(this.inferenceTime / 1000).toFixed(2)}s — ${this.detections.length} objeto(s) detectado(s).`;
     } catch (err) {
       this.status = `Error en inferencia: ${err}`;
     }
@@ -338,6 +346,10 @@ export class App implements AfterViewInit {
     return keep;
   }
 
+  cocoClass(classId: number): string {
+    return COCO_CLASSES[classId] ?? `class_${classId}`;
+  }
+
   private computeIoU(a: Detection, b: Detection): number {
     const ax1 = a.x, ay1 = a.y, ax2 = a.x + a.width, ay2 = a.y + a.height;
     const bx1 = b.x, by1 = b.y, bx2 = b.x + b.width, by2 = b.y + b.height;
@@ -367,7 +379,7 @@ export class App implements AfterViewInit {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const colors = [
-      '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
+      '#00FF00', '#FF0000', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
       '#FF8800', '#88FF00', '#0088FF', '#FF0088', '#8800FF', '#00FF88',
     ];
 
