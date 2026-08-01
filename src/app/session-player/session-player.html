@@ -1,0 +1,68 @@
+<div class="player">
+  <div class="playerHeader">
+    <div class="playerTitle">
+      <span>{{ title() }}</span>
+      <span class="frameCounter">{{ currentIdx() + 1 }} / {{ totalFrames() }}</span>
+      <span class="frameTime">{{ currentFrameLabel }}</span>
+    </div>
+    <button class="btnClose" (click)="onClose()" title="Cerrar">&times;</button>
+  </div>
+
+  <div class="imageWrapper">
+    <canvas #canvas class="mainCanvas"></canvas>
+    @if (totalFrames() === 0) {
+      <div class="empty">Sin fotogramas</div>
+    }
+  </div>
+
+  <div class="controlsBar">
+    <div class="controlsLeft">
+      <button class="ctrlBtn" (click)="prevFrame()" title="Anterior">&#9664;&#9664;</button>
+      <button class="ctrlBtn playBtn" (click)="togglePlay()" title="Reproducir / Pausar">
+        @if (playing()) {
+          &#10074;&#10074;
+        } @else {
+          &#9654;
+        }
+      </button>
+      <button class="ctrlBtn" (click)="nextFrame()" title="Siguiente">&#9654;&#9654;</button>
+      <button
+        class="ctrlBtn loopBtn"
+        [class.active]="looping()"
+        (click)="toggleLoop()"
+        title="Bucle"
+      >
+        &#8635;
+      </button>
+    </div>
+
+    <div class="controlsSlider">
+      <input
+        type="range"
+        min="0"
+        [max]="totalFrames() > 0 ? totalFrames() - 1 : 0"
+        [ngModel]="currentIdx()"
+        (ngModelChange)="goToFrame($event)"
+        class="frameSlider"
+      />
+    </div>
+
+    <div class="controlsRight">
+      <span class="speedLabel">Vel:</span>
+      @for (s of speeds; track s) {
+        <button class="speedBtn" [class.active]="speed() === s" (click)="changeSpeed(s)">
+          {{ s }}x
+        </button>
+      }
+      <input
+        type="text"
+        class="speedInput"
+        [ngModel]="speedInput()"
+        (ngModelChange)="speedInput.set($event)"
+        (keydown.enter)="applyCustomSpeed()"
+        (blur)="applyCustomSpeed()"
+        size="4"
+      />
+    </div>
+  </div>
+</div>

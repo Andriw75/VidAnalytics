@@ -130,6 +130,28 @@
                 [disabled]="extracting"
               />
             </div>
+            <div class="extract-row">
+              <label class="extract-label" for="extractSpeed">Velocidad de extracción:</label>
+              <select
+                id="extractSpeed"
+                [value]="extractSpeed"
+                (change)="onExtractSpeedChange($event)"
+                [disabled]="extracting"
+              >
+                @for (s of extractSpeedOptions; track s) {
+                  <option [value]="s">{{ s }}x</option>
+                }
+              </select>
+              <label class="checkbox-label">
+                <input
+                  type="checkbox"
+                  [checked]="applyInference"
+                  (change)="onApplyInferenceChange($event)"
+                  [disabled]="extracting"
+                />
+                Aplicar inferencia
+              </label>
+            </div>
             @if (extractEstimate) {
               <div class="extract-estimate">
                 ≈ <strong>{{ formatFps(extractEstimate.fpsKept) }}</strong> ·
@@ -200,18 +222,11 @@
             <h3>{{ selectedSession.name }}</h3>
             <button class="btn-close" (click)="closeSession()">Cerrar</button>
           </div>
-          @if (sessionFrames.length > 0) {
-            <div class="frames-grid">
-              @for (f of sessionFrames; track f.index) {
-                <div class="frame-item">
-                  <img [src]="f.url" alt="" />
-                  <div class="frame-tag">{{ formatDuration(f.timestamp) }}</div>
-                </div>
-              }
-            </div>
-          } @else {
-            <p class="no-dets">Cargando fotogramas...</p>
-          }
+          <app-session-player
+            [title]="selectedSession.name"
+            [frames]="sessionFrames"
+            (close)="closeSession()"
+          ></app-session-player>
         </div>
       }
     </div>

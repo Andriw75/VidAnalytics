@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core';
+import { Detection } from './detection';
 
 export interface VideoSession {
   id?: number;
@@ -22,6 +23,7 @@ export interface VideoFrameRecord {
   index: number;
   timestamp: number;
   blob: Blob;
+  detections?: Detection[];
 }
 
 @Injectable({ providedIn: 'root' })

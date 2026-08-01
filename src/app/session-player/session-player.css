@@ -1,0 +1,175 @@
+.player {
+  margin-top: 12px;
+  background: #0f1620;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+}
+
+.playerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #1a2430;
+  border-bottom: 1px solid #263240;
+}
+
+.playerTitle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  color: #e2e8f0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.playerTitle > span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.frameCounter {
+  color: #94a3b8;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.frameTime {
+  color: #64748b;
+  font-weight: 400;
+  font-size: 12px;
+}
+
+.btnClose {
+  background: none;
+  border: none;
+  color: #94a3b8;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.btnClose:hover {
+  color: #fff;
+}
+
+.imageWrapper {
+  position: relative;
+  background: #000;
+  min-height: 160px;
+}
+
+.mainCanvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 70vh;
+  object-fit: contain;
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.controlsBar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #1a2430;
+  border-top: 1px solid #263240;
+  flex-wrap: wrap;
+}
+
+.controlsLeft {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ctrlBtn {
+  min-width: 34px;
+  height: 30px;
+  background: #24303f;
+  border: none;
+  border-radius: 6px;
+  color: #e2e8f0;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.ctrlBtn:hover {
+  background: #2f3e50;
+}
+
+.ctrlBtn.playBtn {
+  min-width: 40px;
+}
+
+.ctrlBtn.loopBtn.active {
+  background: #00695c;
+}
+
+.controlsSlider {
+  flex: 1;
+  min-width: 120px;
+}
+
+.frameSlider {
+  width: 100%;
+  accent-color: #14b8a6;
+}
+
+.controlsRight {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.speedLabel {
+  color: #64748b;
+  font-size: 12px;
+  margin-right: 2px;
+}
+
+.speedBtn {
+  padding: 4px 8px;
+  background: #24303f;
+  border: none;
+  border-radius: 5px;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.speedBtn:hover {
+  color: #e2e8f0;
+}
+
+.speedBtn.active {
+  background: #00695c;
+  color: #fff;
+}
+
+.speedInput {
+  width: 48px;
+  padding: 4px 6px;
+  background: #0f1620;
+  border: 1px solid #263240;
+  border-radius: 5px;
+  color: #e2e8f0;
+  font-size: 12px;
+  text-align: center;
+}
