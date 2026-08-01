@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewInit, ChangeDetectorRef } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { loadLiteRt, loadAndCompile, Tensor, CompiledModel } from '@litertjs/core';
 
 interface Detection {
@@ -15,6 +15,15 @@ interface PadInfo {
   left: number;
   bottom: number;
   right: number;
+}
+
+interface VideoMeta {
+  fileName: string;
+  width: number;
+  height: number;
+  duration: number;
+  fps: number | null;
+  totalFrames: number | null;
 }
 
 const COCO_CLASSES = [
@@ -34,9 +43,10 @@ const COCO_CLASSES = [
   templateUrl: './app.html',
   styleUrl: './app.css'
 })
-export class App implements AfterViewInit {
+export class App implements AfterViewInit, OnDestroy {
   @ViewChild('imageCanvas') canvasRef!: ElementRef<HTMLCanvasElement>;
   @ViewChild('sourceImage') imageRef!: ElementRef<HTMLImageElement>;
+  @ViewChild('sourceVideo') videoRef!: ElementRef<HTMLVideoElement>;
 
   imageUrl: string | null = null;
   selectedModel = 'yolo26n.tflite';
@@ -49,6 +59,11 @@ export class App implements AfterViewInit {
   inferenceDone = false;
 
   private model: CompiledModel | null = null;
+
+  videoUrl: string | null = null;
+  videoFileName: string | null = null;
+  videoMeta: VideoMeta | null = null;
+  videoLoading = false;
 
   constructor(private cdr: ChangeDetectorRef) {}
 
@@ -109,6 +124,120 @@ export class App implements AfterViewInit {
       this.inferenceTime = null;
       this.cdr.detectChanges();
     }
+  }
+
+  async onVideoSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    input.value = '';
+    if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
+    if (this.videoRef) this.videoRef.nativeElement.pause();
+    this.videoUrl = URL.createObjectURL(file);
+    this.videoFileName = file.name;
+    this.videoMeta = null;
+    this.videoLoading = true;
+    this.cdr.detectChanges();
+  }
+
+  async onVideoLoaded() {
+    const video = this.videoRef.nativeElement;
+
+    let duration = video.duration;
+    if (!isFinite(duration) || duration <= 0) {
+      duration = await this.getAccurateDuration(video);
+    }
+
+    const fps = await this.measureFps(video);
+    const totalFrames = fps && duration > 0 ? Math.round(fps * duration) : null;
+
+    this.videoMeta = {
+      fileName: this.videoFileName ?? 'video',
+      width: video.videoWidth,
+      height: video.videoHeight,
+      duration,
+      fps,
+      totalFrames,
+    };
+    this.videoLoading = false;
+    this.cdr.detectChanges();
+  }
+
+  private getAccurateDuration(video: HTMLVideoElement): Promise<number> {
+    return new Promise((resolve) => {
+      const onDuration = () => resolve(video.duration);
+      const onError = () => resolve(video.duration || 0);
+      video.currentTime = 1e7;
+      video.addEventListener('durationchange', onDuration, { once: true });
+      video.addEventListener('error', onError, { once: true });
+      window.setTimeout(() => resolve(video.duration || 0), 3000);
+    });
+  }
+
+  private measureFps(video: HTMLVideoElement): Promise<number | null> {
+    return new Promise((resolve) => {
+      const v = video as HTMLVideoElement & {
+        requestVideoFrameCallback?: (cb: (now: number) => void) => number;
+      };
+
+      if (typeof v.requestVideoFrameCallback !== 'function') {
+        resolve(null);
+        return;
+      }
+
+      let firstNow: number | null = null;
+      let frames = 0;
+      let done = false;
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        video.pause();
+        const elapsed = firstNow !== null ? (performance.now() - firstNow) / 1000 : 0;
+        const fps = firstNow !== null && elapsed > 0 ? frames / elapsed : null;
+        resolve(fps ? Math.round(fps * 100) / 100 : null);
+      };
+
+      const timer = window.setTimeout(finish, 2500);
+      video.addEventListener('ended', finish, { once: true });
+
+      const step = (now: number) => {
+        if (firstNow === null) firstNow = now;
+        frames++;
+        if (firstNow !== null && (performance.now() - firstNow) / 1000 >= 1) {
+          window.clearTimeout(timer);
+          finish();
+          return;
+        }
+        v.requestVideoFrameCallback!(step);
+      };
+
+      v.requestVideoFrameCallback(step);
+      video.muted = true;
+      video.playbackRate = 1;
+      video.currentTime = 0;
+      video.play().catch(() => {
+        window.clearTimeout(timer);
+        finish();
+      });
+    });
+  }
+
+  formatDuration(seconds: number): string {
+    const s = Math.max(0, seconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    const secStr = sec.toFixed(2);
+    if (h > 0) {
+      return `${h}:${String(m).padStart(2, '0')}:${secStr.padStart(5, '0')}`;
+    }
+    return `${m}:${secStr.padStart(5, '0')}`;
+  }
+
+  ngOnDestroy() {
+    if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
+    if (this.imageUrl) URL.revokeObjectURL(this.imageUrl);
   }
 
   async runInference() {

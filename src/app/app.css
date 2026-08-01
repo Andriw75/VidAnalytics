@@ -123,6 +123,14 @@ select {
   to { transform: rotate(360deg); }
 }
 
+.btn-video {
+  background: #7b1fa2;
+}
+
+.btn-video:hover {
+  background: #6a1b9a;
+}
+
 .btn-infer {
   padding: 10px 24px;
   background: #2e7d32;
@@ -189,4 +197,54 @@ select {
   color: #666;
   font-size: 16px;
   margin-top: 80px;
+}
+
+.video-section {
+  margin-top: 24px;
+}
+
+.video-container {
+  position: relative;
+  width: 100%;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+  background: #000;
+}
+
+.video-container video {
+  display: block;
+  width: 100%;
+  max-height: 480px;
+  background: #000;
+}
+
+.video-results {
+  margin-top: 16px;
+}
+
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.meta-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meta-label {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.meta-value {
+  font-size: 18px;
+  font-weight: bold;
+  color: #333;
 }
