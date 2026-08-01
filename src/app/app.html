@@ -115,6 +115,103 @@
               <span class="meta-value">{{ videoMeta.totalFrames !== null ? videoMeta.totalFrames : '—' }}</span>
             </div>
           </div>
+
+          <div class="extract-panel">
+            <div class="extract-row">
+              <label class="extract-label" for="saltoInput">Salto (frames entre capturas):</label>
+              <input
+                id="saltoInput"
+                class="extract-input"
+                type="number"
+                min="1"
+                [max]="saltoMax"
+                [value]="salto"
+                (input)="onSaltoInput($event)"
+                [disabled]="extracting"
+              />
+            </div>
+            @if (extractEstimate) {
+              <div class="extract-estimate">
+                ≈ <strong>{{ formatFps(extractEstimate.fpsKept) }}</strong> ·
+                <strong>{{ extractEstimate.count }}</strong> fotogramas
+              </div>
+            }
+            <div class="extract-actions">
+              <button
+                class="btn-extract"
+                (click)="extractFrames()"
+                [disabled]="extracting || extractEstimate === null"
+              >
+                {{ extracting ? 'Extrayendo...' : 'Extraer fotogramas' }}
+              </button>
+              @if (extracting) {
+                <button class="btn-cancel" (click)="cancelExtract()">Cancelar</button>
+              }
+            </div>
+            @if (extractProgress) {
+              <div class="progress-track">
+                <div
+                  class="progress-fill"
+                  [style.width.%]="(extractProgress.done / extractProgress.total) * 100"
+                ></div>
+              </div>
+            }
+            @if (extractStatus) {
+              <div class="extract-status">{{ extractStatus }}</div>
+            }
+          </div>
+        </div>
+      }
+    </div>
+  }
+
+  @if (sessions.length > 0) {
+    <div class="sessions-section">
+      <div class="sessions-header">
+        <h2>Sesiones guardadas</h2>
+        <button class="btn-danger" (click)="clearSessions()">Borrar todo</button>
+      </div>
+
+      <div class="sessions-grid">
+        @for (s of sessions; track s.id) {
+          <div class="session-card" [class.active]="selectedSession?.id === s.id" (click)="openSession(s)">
+            @if (s.thumbUrl) {
+              <img [src]="s.thumbUrl" class="session-thumb" alt="" />
+            } @else {
+              <div class="session-thumb session-thumb-empty"></div>
+            }
+            <div class="session-info">
+              <div class="session-name">{{ s.name }}</div>
+              <div class="session-detail">
+                {{ s.count }} fotogramas · {{ s.width }}×{{ s.height }} · {{ s.fps ?? '—' }} fps
+              </div>
+              <div class="session-detail">{{ sessionDate(s.createdAt) }}</div>
+            </div>
+            <button class="btn-danger btn-small" (click)="deleteSession(s.id!); $event.stopPropagation()">
+              Eliminar
+            </button>
+          </div>
+        }
+      </div>
+
+      @if (selectedSession) {
+        <div class="session-detail-panel">
+          <div class="sessions-header">
+            <h3>{{ selectedSession.name }}</h3>
+            <button class="btn-close" (click)="closeSession()">Cerrar</button>
+          </div>
+          @if (sessionFrames.length > 0) {
+            <div class="frames-grid">
+              @for (f of sessionFrames; track f.index) {
+                <div class="frame-item">
+                  <img [src]="f.url" alt="" />
+                  <div class="frame-tag">{{ formatDuration(f.timestamp) }}</div>
+                </div>
+              }
+            </div>
+          } @else {
+            <p class="no-dets">Cargando fotogramas...</p>
+          }
         </div>
       }
     </div>

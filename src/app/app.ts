@@ -1,5 +1,6 @@
 import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { loadLiteRt, loadAndCompile, Tensor, CompiledModel } from '@litertjs/core';
+import { VideoStoreService, VideoSession, VideoFrameRecord } from './video-store.service';
 
 interface Detection {
   x: number;
@@ -65,7 +66,20 @@ export class App implements AfterViewInit, OnDestroy {
   videoMeta: VideoMeta | null = null;
   videoLoading = false;
 
-  constructor(private cdr: ChangeDetectorRef) {}
+  salto = 15;
+  extractEstimate: { fpsKept: number | null; count: number } | null = null;
+  extracting = false;
+  extractAbort = false;
+  extractProgress: { done: number; total: number } | null = null;
+  extractStatus = '';
+
+  sessions: VideoSession[] = [];
+  selectedSession: VideoSession | null = null;
+  sessionFrames: { index: number; timestamp: number; url: string }[] = [];
+
+  private readonly supportsWebp = this.detectWebp();
+
+  constructor(private cdr: ChangeDetectorRef, private store: VideoStoreService) {}
 
   async ngAfterViewInit() {
     try {
@@ -93,6 +107,7 @@ export class App implements AfterViewInit, OnDestroy {
       const shape = Array.from(details[0].shape);
       this.status = `Modelo listo (entrada: ${shape.slice(1).join('x')}). Selecciona una imagen.`;
       this.isLoading = false;
+      this.loadSessions();
       this.cdr.detectChanges();
     } catch (err) {
       this.status = `Error al cargar modelo: ${err}`;
@@ -159,8 +174,58 @@ export class App implements AfterViewInit, OnDestroy {
       fps,
       totalFrames,
     };
+    this.salto = fps ? Math.max(1, Math.round(fps / 2)) : 15;
+    this.computeExtractEstimate();
     this.videoLoading = false;
     this.cdr.detectChanges();
+  }
+
+  private detectWebp(): boolean {
+    const canvas = document.createElement('canvas');
+    return canvas.toDataURL('image/webp').startsWith('data:image/webp');
+  }
+
+  get saltoMax(): number {
+    const meta = this.videoMeta;
+    return meta?.fps ? Math.max(1, Math.ceil(meta.fps)) : 60;
+  }
+
+  computeExtractEstimate() {
+    const meta = this.videoMeta;
+    if (!meta) {
+      this.extractEstimate = null;
+      return;
+    }
+    const salto = Math.max(1, Math.round(this.salto));
+    let count: number;
+    let fpsKept: number | null = null;
+    if (meta.fps && meta.totalFrames) {
+      count = Math.ceil(meta.totalFrames / salto);
+      fpsKept = meta.fps / salto;
+    } else if (meta.fps && meta.duration > 0) {
+      const tf = Math.round(meta.fps * meta.duration);
+      count = Math.ceil(tf / salto);
+      fpsKept = meta.fps / salto;
+    } else {
+      count = Math.ceil(meta.duration * salto);
+    }
+    this.extractEstimate = { fpsKept, count };
+  }
+
+  onSaltoInput(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const v = parseInt(input.value, 10);
+    this.salto = Number.isFinite(v) && v > 0 ? v : 1;
+    this.computeExtractEstimate();
+  }
+
+  formatFps(v: number | null): string {
+    if (v === null) return 'fps no medible';
+    return `${Math.round(v * 100) / 100} fps`;
+  }
+
+  sessionDate(ts: number): string {
+    return new Date(ts).toLocaleString();
   }
 
   private getAccurateDuration(video: HTMLVideoElement): Promise<number> {
@@ -235,9 +300,198 @@ export class App implements AfterViewInit, OnDestroy {
     return `${m}:${secStr.padStart(5, '0')}`;
   }
 
+  async extractFrames() {
+    const meta = this.videoMeta;
+    if (!meta || !this.videoRef || this.extracting) return;
+    if (!this.extractEstimate) this.computeExtractEstimate();
+    const estimate = this.extractEstimate;
+    if (!estimate || estimate.count <= 0) return;
+
+    const video = this.videoRef.nativeElement;
+    const salto = Math.max(1, Math.round(this.salto));
+    const fps = meta.fps;
+
+    this.extracting = true;
+    this.extractAbort = false;
+    this.extractProgress = { done: 0, total: estimate.count };
+    this.extractStatus = 'Preparando extracción...';
+    this.cdr.detectChanges();
+
+    const frames: Omit<VideoFrameRecord, 'id' | 'sessionId'>[] = [];
+
+    try {
+      video.pause();
+      for (let k = 0; k < estimate.count; k++) {
+        if (this.extractAbort) {
+          this.extractStatus = 'Extracción cancelada.';
+          break;
+        }
+        const time = Math.min(
+          fps && fps > 0 ? (k * salto) / fps : k / salto,
+          Math.max(0, meta.duration - 0.001)
+        );
+        const blob = await this.captureFrame(video, time);
+        frames.push({ index: k, timestamp: time, blob });
+        this.extractProgress = { done: k + 1, total: estimate.count };
+        this.extractStatus = `Extrayendo ${k + 1}/${estimate.count}`;
+        this.cdr.detectChanges();
+      }
+    } catch (err) {
+      this.extractStatus = `Error en extracción: ${err}`;
+    }
+
+    video.pause();
+    video.currentTime = 0;
+
+    if (!this.extractAbort && frames.length > 0) {
+      const thumbnail = await this.makeThumbnail(frames[0].blob);
+      const session: VideoSession = {
+        name: `${meta.fileName} — salto ${salto}`,
+        createdAt: Date.now(),
+        fileName: meta.fileName,
+        width: meta.width,
+        height: meta.height,
+        duration: meta.duration,
+        fps: meta.fps,
+        totalFrames: meta.totalFrames,
+        salto,
+        count: frames.length,
+        thumbnail,
+      };
+      try {
+        await this.store.saveSession(session, frames);
+        this.extractStatus = `Sesión guardada: ${frames.length} fotogramas.`;
+        await this.loadSessions();
+      } catch (err) {
+        this.extractStatus = `Error al guardar sesión: ${err}`;
+      }
+    }
+
+    this.extracting = false;
+    this.extractProgress = null;
+    this.cdr.detectChanges();
+  }
+
+  cancelExtract() {
+    this.extractAbort = true;
+  }
+
+  private captureFrame(video: HTMLVideoElement, time: number): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      let timeout = 0;
+      const cleanup = () => {
+        video.removeEventListener('seeked', onSeeked);
+        video.removeEventListener('error', onError);
+        window.clearTimeout(timeout);
+      };
+      const onSeeked = () => {
+        cleanup();
+        const canvas = document.createElement('canvas');
+        const maxDim = 640;
+        const scale = Math.min(1, maxDim / Math.max(video.videoWidth, video.videoHeight));
+        canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+        canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+        const ctx = canvas.getContext('2d')!;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(
+          (blob) => (blob ? resolve(blob) : reject(new Error('toBlob falló'))),
+          this.supportsWebp ? 'image/webp' : 'image/jpeg',
+          this.supportsWebp ? 0.82 : 0.85
+        );
+      };
+      const onError = () => {
+        cleanup();
+        reject(new Error('error al buscar fotograma'));
+      };
+
+      if (Math.abs(video.currentTime - time) < 0.001) {
+        onSeeked();
+        return;
+      }
+      video.addEventListener('seeked', onSeeked, { once: true });
+      video.addEventListener('error', onError, { once: true });
+      timeout = window.setTimeout(onSeeked, 2000);
+      video.currentTime = time;
+    });
+  }
+
+  private makeThumbnail(blob: Blob): Promise<Blob | undefined> {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const maxDim = 160;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        canvas.getContext('2d')!.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        canvas.toBlob(
+          (blob) => resolve(blob ?? undefined),
+          this.supportsWebp ? 'image/webp' : 'image/jpeg',
+          0.7
+        );
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve(undefined);
+      };
+      img.src = url;
+    });
+  }
+
+  async loadSessions() {
+    for (const s of this.sessions) {
+      if (s.thumbUrl) URL.revokeObjectURL(s.thumbUrl);
+    }
+    const sessions = await this.store.listSessions();
+    for (const s of sessions) {
+      if (s.thumbnail) s.thumbUrl = URL.createObjectURL(s.thumbnail);
+    }
+    this.sessions = sessions;
+    this.cdr.detectChanges();
+  }
+
+  async openSession(session: VideoSession) {
+    if (this.selectedSession) this.closeSession();
+    this.selectedSession = session;
+    this.sessionFrames = [];
+    this.cdr.detectChanges();
+    const records = await this.store.getFrames(session.id!);
+    this.sessionFrames = records.map((r) => ({
+      index: r.index,
+      timestamp: r.timestamp,
+      url: URL.createObjectURL(r.blob),
+    }));
+    this.cdr.detectChanges();
+  }
+
+  closeSession() {
+    for (const f of this.sessionFrames) URL.revokeObjectURL(f.url);
+    this.sessionFrames = [];
+    this.selectedSession = null;
+  }
+
+  async deleteSession(id: number) {
+    await this.store.deleteSession(id);
+    if (this.selectedSession?.id === id) this.closeSession();
+    await this.loadSessions();
+  }
+
+  async clearSessions() {
+    await this.store.clearAll();
+    this.closeSession();
+    await this.loadSessions();
+  }
+
   ngOnDestroy() {
     if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
     if (this.imageUrl) URL.revokeObjectURL(this.imageUrl);
+    this.closeSession();
+    for (const s of this.sessions) {
+      if (s.thumbUrl) URL.revokeObjectURL(s.thumbUrl);
+    }
   }
 
   async runInference() {
