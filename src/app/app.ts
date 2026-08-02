@@ -1,7 +1,7 @@
 import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, ChangeDetectorRef } from '@angular/core';
 import { VideoStoreService, VideoSession } from './video-store.service';
 import { InferenceService } from './inference.service';
-import { VideoExtractionService } from './video-extraction.service';
+import { VideoExtractionService, ProgressStats } from './video-extraction.service';
 import { SessionPlayerComponent, SessionFrame } from './session-player/session-player';
 import { Detection, VideoMeta } from './detection';
 
@@ -40,6 +40,7 @@ export class App implements AfterViewInit, OnDestroy {
   extractAbort = false;
   extractProgress: { done: number; total: number } | null = null;
   extractStatus = '';
+  private extractStartTime = 0;
 
   sessions: VideoSession[] = [];
   selectedSession: VideoSession | null = null;
@@ -195,6 +196,29 @@ export class App implements AfterViewInit, OnDestroy {
     return this.inference.cocoClass(classId);
   }
 
+  private formatInferProgress(done: number, total: number, stats?: ProgressStats): string {
+    const pct = total > 0 ? (done >= total ? 100 : Math.floor((done / total) * 100)) : 0;
+    let line = `Infiriendo ${done}/${total} (${pct}%)`;
+    if (stats) {
+      const elapsed = performance.now() - this.extractStartTime;
+      const eta = Math.max(0, stats.etaMs);
+      line +=
+        ` · ${Math.round(stats.lastMs)}ms/frame` +
+        (stats.avgMs ? ` · prom ${Math.round(stats.avgMs)}ms` : '') +
+        ` · ETA ${this.fmtElapsed(eta)}` +
+        ` · elapsed ${this.fmtElapsed(elapsed)}`;
+    }
+    return line;
+  }
+
+  private fmtElapsed(ms: number): string {
+    const s = Math.max(0, ms / 1000);
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const r = Math.round(s % 60);
+    return `${m}m ${r}s`;
+  }
+
   async extractFrames() {
     const meta = this.videoMeta;
     if (!meta || !this.videoRef || this.extracting) return;
@@ -205,6 +229,7 @@ export class App implements AfterViewInit, OnDestroy {
 
     this.extracting = true;
     this.extractAbort = false;
+    this.extractStartTime = performance.now();
     this.extractProgress = { done: 0, total: estimate.count };
     this.extractStatus = this.applyInference
       ? 'Preparando extracción e inferencia...'
@@ -226,12 +251,25 @@ export class App implements AfterViewInit, OnDestroy {
           onProgress: (done, total) => {
             this.extractProgress = { done, total };
             this.extractStatus =
-              `Extrayendo ${done}/${total}` + (this.applyInference ? ' (infiriendo...)' : '');
+              `Extrayendo ${done}/${total} (${Math.floor((done / total) * 100)}%) · ` +
+              this.fmtElapsed(performance.now() - this.extractStartTime);
             this.cdr.detectChanges();
           },
-          onInferProgress: (done, total) => {
+          onFinalize: (done, total) => {
             this.extractProgress = { done, total };
-            this.extractStatus = `Infiriendo ${done}/${total}`;
+            this.extractStatus =
+              `Finalizando extracción ${done}/${total} · ` +
+              this.fmtElapsed(performance.now() - this.extractStartTime);
+            this.cdr.detectChanges();
+          },
+          onInferStart: (total) => {
+            this.extractProgress = { done: 0, total };
+            this.extractStatus = `Preparando inferencia: 0/${total} · elapsed ${this.fmtElapsed(performance.now() - this.extractStartTime)}`;
+            this.cdr.detectChanges();
+          },
+          onInferProgress: (done, total, stats) => {
+            this.extractProgress = { done, total };
+            this.extractStatus = this.formatInferProgress(done, total, stats);
             this.cdr.detectChanges();
           },
           shouldCancel: () => this.extractAbort,
@@ -241,6 +279,8 @@ export class App implements AfterViewInit, OnDestroy {
       if (this.extractAbort) {
         this.extractStatus = 'Extracción cancelada.';
       } else if (frames.length > 0) {
+        this.extractStatus = `Guardando sesión: ${frames.length} fotogramas...`;
+        this.cdr.detectChanges();
         const thumbnail = await this.extractSvc.makeThumbnail(frames[0].blob);
         const session: VideoSession = {
           name: `${meta.fileName} — salto ${this.salto}`,
@@ -264,18 +304,25 @@ export class App implements AfterViewInit, OnDestroy {
         } catch (err) {
           this.extractStatus = `Error al guardar sesión: ${err}`;
         }
+      } else {
+        this.extractStatus = 'No se pudieron extraer fotogramas.';
       }
     } catch (err) {
       this.extractStatus = `Error en extracción: ${err}`;
+    } finally {
+      this.extracting = false;
+      this.extractProgress = null;
+      this.cdr.detectChanges();
     }
-
-    this.extracting = false;
-    this.extractProgress = null;
-    this.cdr.detectChanges();
   }
 
   cancelExtract() {
+    if (!this.extracting) return;
     this.extractAbort = true;
+    this.extractStatus = 'Cancelando...';
+    this.cdr.detectChanges();
+    this.extractSvc.cancelActive();
+    this.inference.cancelPending();
   }
 
   async loadSessions() {

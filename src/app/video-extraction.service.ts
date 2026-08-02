@@ -13,10 +13,19 @@ export interface ExtractionEstimate {
   count: number;
 }
 
+export interface ProgressStats {
+  lastMs: number;
+  avgMs: number;
+  elapsedMs: number;
+  etaMs: number;
+}
+
 export interface ExtractionOptions {
   infer?: (blob: Blob) => Promise<Detection[]>;
   onProgress?: (done: number, total: number) => void;
-  onInferProgress?: (done: number, total: number) => void;
+  onFinalize?: (done: number, total: number) => void;
+  onInferStart?: (total: number) => void;
+  onInferProgress?: (done: number, total: number, stats?: ProgressStats) => void;
   shouldCancel?: () => boolean;
 }
 
@@ -24,9 +33,36 @@ type VideoWithRVFC = HTMLVideoElement & {
   requestVideoFrameCallback?: (cb: (now: number, meta: { mediaTime?: number }) => void) => number;
 };
 
+class CancellationToken {
+  cancelled = false;
+  private handlers = new Set<() => void>();
+
+  add(handler: () => void): () => void {
+    if (this.cancelled) {
+      handler();
+      return () => {};
+    }
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
+  }
+
+  cancel(): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    const handlers = [...this.handlers];
+    this.handlers.clear();
+    for (const handler of handlers) handler();
+  }
+}
+
 @Injectable({ providedIn: 'root' })
 export class VideoExtractionService {
   private readonly supportsWebp = this.detectWebp();
+  private activeToken: CancellationToken | null = null;
+
+  cancelActive(): void {
+    this.activeToken?.cancel();
+  }
 
   estimate(meta: VideoMeta, salto: number): ExtractionEstimate {
     const stride = Math.max(1, Math.round(salto));
@@ -52,29 +88,39 @@ export class VideoExtractionService {
     salto: number,
     opts: ExtractionOptions = {}
   ): Promise<ExtractedFrame[]> {
-    let useWebCodecs = false;
-    if (
-      file &&
-      typeof VideoDecoder !== 'undefined' &&
-      typeof Worker !== 'undefined' &&
-      typeof OffscreenCanvas !== 'undefined'
-    ) {
-      useWebCodecs = await this.isMp4(file);
+    const token = new CancellationToken();
+    this.activeToken = token;
+
+    try {
+      let useWebCodecs = false;
+      if (
+        file &&
+        typeof VideoDecoder !== 'undefined' &&
+        typeof Worker !== 'undefined' &&
+        typeof OffscreenCanvas !== 'undefined'
+      ) {
+        useWebCodecs = await this.isMp4(file);
+      }
+      if (token.cancelled) return [];
+      if (useWebCodecs) {
+        return await this.extractWebCodecs(file!, meta, salto, opts, token);
+      }
+      return await this.extractByPlayback(video, meta, salto, opts, token);
+    } finally {
+      if (this.activeToken === token) this.activeToken = null;
     }
-    if (useWebCodecs) {
-      return this.extractWebCodecs(file!, meta, salto, opts);
-    }
-    return this.extractByPlayback(video, meta, salto, opts);
   }
 
   private async extractWebCodecs(
     file: File,
     meta: VideoMeta,
     salto: number,
-    opts: ExtractionOptions = {}
+    opts: ExtractionOptions = {},
+    token: CancellationToken
   ): Promise<ExtractedFrame[]> {
     const stride = Math.max(1, Math.round(salto));
-    const buffer = await file.arrayBuffer();
+    const buffer = await this.readFileBuffer(file, token);
+    if (!buffer || token.cancelled) return [];
     const mime = this.captureMime;
     const quality = this.captureQuality;
     const estimate = this.estimate(meta, stride);
@@ -86,25 +132,44 @@ export class VideoExtractionService {
       const byIndex = new Map<number, ExtractedFrame>();
       let expectedTotal = 0;
       let terminated = false;
+      let currentFrames: ExtractedFrame[] = [];
+      let removeCancel = () => {};
 
       const timeout = window.setTimeout(() => {
-        terminated = true;
-        worker.terminate();
-        reject(new Error('Timeout en la extracción'));
+        rejectOnce(new Error('Timeout en la extracción'));
       }, 120000);
 
-      worker.onerror = (event) => {
-        window.clearTimeout(timeout);
+      const settle = (frames: ExtractedFrame[]) => {
+        if (terminated) return;
         terminated = true;
+        window.clearTimeout(timeout);
+        removeCancel();
         worker.terminate();
-        reject(new Error(`Error del worker: ${event.message}`));
+        resolve(frames);
+      };
+
+      const rejectOnce = (error: Error) => {
+        if (terminated) return;
+        terminated = true;
+        window.clearTimeout(timeout);
+        removeCancel();
+        worker.terminate();
+        reject(error);
+      };
+
+      removeCancel = token.add(() => {
+        currentFrames = [...byIndex.values()]
+          .sort((a, b) => a.index - b.index)
+          .filter((frame) => frame.blob.size > 0);
+        settle(currentFrames);
+      });
+
+      worker.onerror = (event) => {
+        rejectOnce(new Error(`Error del worker: ${event.message || 'desconocido'}`));
       };
 
       worker.onmessageerror = () => {
-        window.clearTimeout(timeout);
-        terminated = true;
-        worker.terminate();
-        reject(new Error('Error de mensaje en el worker'));
+        rejectOnce(new Error('Error de mensaje en el worker'));
       };
 
       worker.onmessage = async (event) => {
@@ -117,6 +182,7 @@ export class VideoExtractionService {
             break;
 
           case 'frame': {
+            if (token.cancelled) return;
             const blob = new Blob([msg.buffer], { type: mime });
             byIndex.set(msg.index, {
               index: msg.index,
@@ -128,36 +194,79 @@ export class VideoExtractionService {
             break;
           }
 
+          case 'finalizing': {
+            const total = expectedTotal > 0 ? Math.ceil(expectedTotal / stride) : estimate.count;
+            opts.onFinalize?.(byIndex.size, total);
+            break;
+          }
+
           case 'done': {
             window.clearTimeout(timeout);
             const ordered = [...byIndex.values()].sort((a, b) => a.index - b.index);
+            currentFrames = ordered;
+            worker.terminate();
             try {
               if (opts.infer && !opts.shouldCancel?.()) {
+                opts.onInferStart?.(ordered.length);
+                const start = performance.now();
                 for (let i = 0; i < ordered.length; i++) {
-                  if (opts.shouldCancel?.()) break;
+                  if (token.cancelled || opts.shouldCancel?.()) {
+                    token.cancel();
+                    return;
+                  }
+                  const t0 = performance.now();
                   ordered[i].detections = await opts.infer(ordered[i].blob);
-                  opts.onInferProgress?.(i + 1, ordered.length);
+                  const now = performance.now();
+                  const lastMs = now - t0;
+                  const elapsedMs = now - start;
+                  const avgMs = elapsedMs / (i + 1);
+                  const etaMs = avgMs * (ordered.length - (i + 1));
+                  opts.onInferProgress?.(i + 1, ordered.length, { lastMs, avgMs, elapsedMs, etaMs });
                 }
               }
             } catch (err) {
-              worker.terminate();
-              reject(err);
+              if (token.cancelled || opts.shouldCancel?.()) {
+                settle(currentFrames);
+              } else {
+                rejectOnce(err instanceof Error ? err : new Error(String(err)));
+              }
               return;
             }
-            worker.terminate();
-            resolve(ordered);
+            if (token.cancelled || opts.shouldCancel?.()) {
+              settle(currentFrames);
+            } else {
+              settle(ordered);
+            }
             break;
           }
 
           case 'error':
-            window.clearTimeout(timeout);
-            worker.terminate();
-            reject(new Error(msg.message));
+            rejectOnce(new Error(msg.message));
             break;
         }
       };
 
       worker.postMessage({ type: 'start', buffer, stride, maxDim: 640, mime, quality }, [buffer]);
+    });
+  }
+
+  private readFileBuffer(file: File, token: CancellationToken): Promise<ArrayBuffer | null> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      const removeCancel = token.add(() => reader.abort());
+      reader.onload = () => {
+        removeCancel();
+        resolve(reader.result as ArrayBuffer);
+      };
+      reader.onerror = () => {
+        removeCancel();
+        reject(reader.error ?? new Error('No se pudo leer el video'));
+      };
+      reader.onabort = () => {
+        removeCancel();
+        resolve(null);
+      };
+      reader.readAsArrayBuffer(file);
     });
   }
 
@@ -265,7 +374,8 @@ export class VideoExtractionService {
     video: HTMLVideoElement,
     meta: VideoMeta,
     salto: number,
-    opts: ExtractionOptions = {}
+    opts: ExtractionOptions = {},
+    token: CancellationToken
   ): Promise<ExtractedFrame[]> {
     const stride = Math.max(1, Math.round(salto));
     const fps = meta.fps && meta.fps > 0 ? meta.fps : null;
@@ -293,6 +403,7 @@ export class VideoExtractionService {
     const tasks: Promise<void>[] = [];
     let nextIndex = 0;
     let finished = false;
+    let cancelCurrentSeek = () => {};
 
     const capture = (time: number) => {
       const idx = nextIndex;
@@ -316,23 +427,25 @@ export class VideoExtractionService {
     const seekCapture = (time: number): Promise<void> =>
       new Promise((resolve) => {
         let timeout = 0;
+        let resolved = false;
         const cleanup = () => {
           video.removeEventListener('seeked', onSeeked);
           video.removeEventListener('error', onError);
           window.clearTimeout(timeout);
+          cancelCurrentSeek = () => {};
         };
-        const onSeeked = () => {
+        const complete = (captureFrame: boolean) => {
+          if (resolved) return;
+          resolved = true;
           cleanup();
-          capture(time);
+          if (captureFrame && !token.cancelled && !settled) capture(time);
           resolve();
         };
-        const onError = () => {
-          cleanup();
-          resolve();
-        };
+        const onSeeked = () => complete(true);
+        const onError = () => complete(false);
+        cancelCurrentSeek = () => complete(false);
         if (Math.abs(video.currentTime - time) < 0.001) {
-          capture(time);
-          resolve();
+          complete(true);
           return;
         }
         video.addEventListener('seeked', onSeeked, { once: true });
@@ -343,9 +456,16 @@ export class VideoExtractionService {
 
     let resolvePromise!: (frames: ExtractedFrame[]) => void;
     const done = new Promise<ExtractedFrame[]>((res) => (resolvePromise = res));
+    let settled = false;
+
+    const settle = (frames: ExtractedFrame[]) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(frames);
+    };
 
     const finish = async () => {
-      if (finished) return;
+      if (finished || settled) return;
       finished = true;
       video.removeEventListener('ended', onEnded);
 
@@ -362,12 +482,24 @@ export class VideoExtractionService {
       const frames = [...pending.values()]
         .sort((a, b) => a.index - b.index)
         .filter((f) => f.blob.size > 0);
-      resolvePromise(frames);
+      settle(frames);
     };
 
-    const onEnded = () => {
+    function onEnded() {
       void finish();
-    };
+    }
+
+    token.add(() => {
+      finished = true;
+      video.pause();
+      video.removeEventListener('ended', onEnded);
+      cancelCurrentSeek();
+      const frames = [...pending.values()]
+        .sort((a, b) => a.index - b.index)
+        .filter((frame) => frame.blob.size > 0);
+      settle(frames);
+    });
+
     video.addEventListener('ended', onEnded);
 
     const v = video as VideoWithRVFC;
@@ -375,7 +507,8 @@ export class VideoExtractionService {
 
     const step = () => {
       if (finished) return;
-      if (opts.shouldCancel?.()) {
+      if (token.cancelled || opts.shouldCancel?.()) {
+        token.cancel();
         void finish();
         return;
       }

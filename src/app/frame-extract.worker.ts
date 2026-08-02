@@ -16,6 +16,8 @@ type WorkerContext = {
 };
 
 const ctx = self as unknown as WorkerContext;
+const MAX_DECODE_QUEUE = 8;
+const MAX_CAPTURE_PENDING = 4;
 
 ctx.onmessage = (event: MessageEvent) => {
   const msg = event.data as StartMessage;
@@ -61,16 +63,56 @@ function runExtraction(msg: StartMessage): Promise<void> {
     let decoder: VideoDecoder | null = null;
     let width = 0;
     let height = 0;
+    let outW = 1;
+    let outH = 1;
     let timescale = 0;
     let totalFrames = 0;
     let framesSubmitted = 0;
     let frameCounter = 0;
     let keptCount = 0;
     let finished = false;
+    let finishing = false;
+    let captureRunning = false;
+    let capturePending = 0;
 
-    const keptPromises: Promise<void>[] = [];
+    const captureQueue: Array<{ frame: VideoFrame; index: number; timestamp: number }> = [];
+    const capacityWaiters = new Set<() => void>();
+    const drainWaiters = new Set<() => void>();
     const canvas = new OffscreenCanvas(1, 1);
     let canvasCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+    const canSubmit = () =>
+      capturePending < MAX_CAPTURE_PENDING &&
+      (!decoder || decoder.decodeQueueSize < MAX_DECODE_QUEUE);
+
+    const notifyCapacity = () => {
+      if (!canSubmit()) return;
+      const waiters = [...capacityWaiters];
+      capacityWaiters.clear();
+      for (const waiter of waiters) waiter();
+    };
+
+    const waitForCapacity = async () => {
+      while (!canSubmit()) {
+        await new Promise<void>((resolve) => capacityWaiters.add(resolve));
+      }
+    };
+
+    const isCaptureDrained = () =>
+      capturePending === 0 && captureQueue.length === 0 && !captureRunning;
+
+    const notifyDrain = () => {
+      if (!isCaptureDrained()) return;
+      const waiters = [...drainWaiters];
+      drainWaiters.clear();
+      for (const waiter of waiters) waiter();
+    };
+
+    const waitForCaptureDrain = async () => {
+      while (!isCaptureDrained()) {
+        await new Promise<void>((resolve) => drainWaiters.add(resolve));
+      }
+    };
 
     const fail = (message: string) => {
       if (finished) return;
@@ -80,26 +122,63 @@ function runExtraction(msg: StartMessage): Promise<void> {
       } catch {
         /* noop */
       }
+      while (captureQueue.length > 0) captureQueue.shift()!.frame.close();
       reject(new Error(message));
     };
 
     const finish = async () => {
-      if (finished) return;
-      finished = true;
+      if (finished || finishing) return;
+      finishing = true;
       try {
         if (decoder) await decoder.flush();
-        await Promise.all(keptPromises);
-      } catch {
-        /* noop */
+        await waitForCaptureDrain();
+        decoder?.close();
+        finished = true;
+        ctx.postMessage({ type: 'done', total: keptCount });
+        resolve();
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
       } finally {
-        try {
-          decoder?.close();
-        } catch {
-          /* noop */
-        }
+        finishing = false;
       }
-      ctx.postMessage({ type: 'done', total: keptCount });
-      resolve();
+    };
+
+    const processCaptureQueue = async () => {
+      if (captureRunning) return;
+      captureRunning = true;
+      try {
+        while (captureQueue.length > 0 && !finished) {
+          const item = captureQueue.shift()!;
+          try {
+            if (canvas.width !== outW || canvas.height !== outH) {
+              canvas.width = outW;
+              canvas.height = outH;
+              canvasCtx = canvas.getContext('2d');
+            }
+            canvasCtx!.drawImage(item.frame, 0, 0, outW, outH);
+            const blob = await canvas.convertToBlob({
+              type: msg.mime,
+              quality: msg.quality,
+            });
+            const buf = await blob.arrayBuffer();
+            ctx.postMessage(
+              { type: 'frame', index: item.index, timestamp: item.timestamp, buffer: buf },
+              [buf]
+            );
+          } finally {
+            item.frame.close();
+            capturePending--;
+            notifyCapacity();
+            notifyDrain();
+          }
+        }
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
+      } finally {
+        captureRunning = false;
+        notifyCapacity();
+        notifyDrain();
+      }
     };
 
     file.onError = (module, message) => fail(`${module}: ${message}`);
@@ -180,8 +259,8 @@ function runExtraction(msg: StartMessage): Promise<void> {
         }
 
         const scale = Math.min(1, maxDim / Math.max(width, height));
-        const outW = Math.max(1, Math.round(width * scale));
-        const outH = Math.max(1, Math.round(height * scale));
+        outW = Math.max(1, Math.round(width * scale));
+        outH = Math.max(1, Math.round(height * scale));
 
         decoder = new VideoDecoder({
           output: (frame) => {
@@ -190,29 +269,17 @@ function runExtraction(msg: StartMessage): Promise<void> {
             if (isKept) {
               const index = keptCount;
               keptCount++;
-              keptPromises.push(
-                (async () => {
-                  const timestamp = Math.max(0, frame.timestamp / 1e6);
-                  try {
-                    if (canvas.width !== outW || canvas.height !== outH) {
-                      canvas.width = outW;
-                      canvas.height = outH;
-                      canvasCtx = canvas.getContext('2d');
-                    }
-                    canvasCtx!.drawImage(frame, 0, 0, outW, outH);
-                    const blob = await canvas.convertToBlob({
-                      type: msg.mime,
-                      quality: msg.quality,
-                    });
-                    const buf = await blob.arrayBuffer();
-                    ctx.postMessage({ type: 'frame', index, timestamp, buffer: buf }, [buf]);
-                  } finally {
-                    frame.close();
-                  }
-                })().catch((err) => fail(err instanceof Error ? err.message : String(err)))
-              );
+              capturePending++;
+              captureQueue.push({
+                frame,
+                index,
+                timestamp: Math.max(0, frame.timestamp / 1e6),
+              });
+              void processCaptureQueue();
+              notifyCapacity();
             } else {
               frame.close();
+              notifyCapacity();
             }
           },
           error: (err) => fail(String(err?.message ?? err)),
@@ -221,9 +288,12 @@ function runExtraction(msg: StartMessage): Promise<void> {
 
         for (const chunk of queued) {
           if (finished || !decoder) break;
+          await waitForCapacity();
+          if (finished || !decoder) break;
           framesSubmitted++;
           decoder.decode(chunk);
         }
+        ctx.postMessage({ type: 'finalizing', total: keptCount });
         void finish();
       } catch (err) {
         fail(err instanceof Error ? err.message : String(err));
