@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core';
-import { Detection } from './detection';
+import { Detection, ModelMetadata } from './detection';
+import { drawPose } from './pose-renderer';
 
 const COCO_CLASSES = [
   'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
@@ -32,21 +33,27 @@ interface WorkerMessage {
   detections?: Detection[];
   error?: string;
   message?: string;
+  metadata?: ModelMetadata;
 }
 
 @Injectable({ providedIn: 'root' })
 export class InferenceService {
   private worker: Worker | null = null;
   private modelName: string | null = null;
+  private modelMetadata: ModelMetadata | null = null;
   private nextId = 1;
   private inferenceGeneration = 0;
   private pending = new Map<number, Pending>();
-  private readyResolve: ((shape: string) => void) | null = null;
+  private readyResolve: ((metadata: ModelMetadata) => void) | null = null;
   private readyReject: ((error: Error) => void) | null = null;
   private shape = '';
 
   get isReady(): boolean {
     return this.shape !== '';
+  }
+
+  get metadata(): ModelMetadata | null {
+    return this.modelMetadata;
   }
 
   async init(): Promise<void> {
@@ -65,7 +72,8 @@ export class InferenceService {
 
     if (msg.type === 'ready') {
       this.shape = msg.shape ?? '';
-      this.readyResolve?.(this.shape);
+      if (msg.metadata) this.modelMetadata = msg.metadata;
+      if (this.modelMetadata) this.readyResolve?.(this.modelMetadata);
       this.readyResolve = null;
       this.readyReject = null;
     } else if (msg.type === 'result') {
@@ -99,17 +107,16 @@ export class InferenceService {
     this.failAll(error);
   }
 
-  async loadModel(name: string): Promise<string> {
+  async loadModel(name: string, metadata: ModelMetadata): Promise<ModelMetadata> {
     this.modelName = name;
+    this.modelMetadata = metadata;
     await this.init();
-    const shapePromise = new Promise<string>((resolve, reject) => {
+    const metadataPromise = new Promise<ModelMetadata>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
     });
-    this.worker!.postMessage({ type: 'init', model: name });
-    const shape = await shapePromise;
-    this.shape = shape;
-    return shape;
+    this.worker!.postMessage({ type: 'init', model: name, metadata });
+    return metadataPromise;
   }
 
   async inferImage(source: ImageSource): Promise<Detection[]> {
@@ -167,7 +174,7 @@ export class InferenceService {
     if (this.worker && this.isReady) return;
     if (!this.modelName) throw new Error('Modelo no seleccionado');
     await this.init();
-    if (!this.isReady) await this.loadModel(this.modelName);
+    if (!this.isReady && this.modelMetadata) await this.loadModel(this.modelName, this.modelMetadata);
   }
 
   cocoClass(classId: number): string {
@@ -207,6 +214,7 @@ export class InferenceService {
       ctx.fillRect(d.x, d.y - labelH, textW + 8, labelH);
       ctx.fillStyle = '#fff';
       ctx.fillText(label, d.x + 4, d.y - 4);
+      if (d.keypoints?.length) drawPose(ctx, d.keypoints, imgW);
     }
   }
 }

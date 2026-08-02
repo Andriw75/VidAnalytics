@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { Detection } from './detection';
+import { Detection, ModelMetadata, ModelTask } from './detection';
 
 export interface VideoSession {
   id?: number;
@@ -15,6 +15,9 @@ export interface VideoSession {
   count: number;
   thumbnail?: Blob;
   thumbUrl?: string;
+  modelFile?: string;
+  modelTask?: ModelTask;
+  modelMetadata?: ModelMetadata;
 }
 
 export interface VideoFrameRecord {

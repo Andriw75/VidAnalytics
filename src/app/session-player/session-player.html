@@ -15,6 +15,14 @@
     }
   </div>
 
+  @if (metadata()?.task === 'pose') {
+    <div class="poseLegend">
+      @for (item of poseColors; track item.label) {
+        <span><i [style.background]="item.color"></i>{{ item.label }}</span>
+      }
+    </div>
+  }
+
   <div class="controlsBar">
     <div class="controlsLeft">
       <button class="ctrlBtn" (click)="prevFrame()" title="Anterior">&#9664;&#9664;</button>

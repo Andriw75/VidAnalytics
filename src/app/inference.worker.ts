@@ -1,9 +1,10 @@
 import { loadLiteRt, loadAndCompile, Tensor, CompiledModel } from '@litertjs/core';
-import { Detection, PadInfo } from './detection';
+import { Detection, Keypoint, ModelMetadata, PadInfo } from './detection';
 
 interface InitMessage {
   type: 'init';
   model: string;
+  metadata: ModelMetadata;
 }
 
 interface InferMessage {
@@ -20,6 +21,8 @@ type WorkerContext = {
 const ctx = self as unknown as WorkerContext;
 
 let model: CompiledModel | null = null;
+let runtimeReady = false;
+let modelMetadata: ModelMetadata | null = null;
 
 const workerGlobal = self as typeof self & {
   Module?: { locateFile?: (path: string) => string };
@@ -37,16 +40,31 @@ ctx.onmessage = async (event: MessageEvent) => {
 
   if (msg.type === 'init') {
     try {
-      await loadLiteRt('/wasm/');
+      if (!runtimeReady) {
+        await loadLiteRt('/wasm/');
+        runtimeReady = true;
+      }
       if (model) {
         model.delete();
         model = null;
       }
+      modelMetadata = msg.metadata;
       model = await loadAndCompile(`/models/${msg.model}`, {
         accelerator: 'wasm',
       });
       const shape = Array.from(model.getInputDetails()[0].shape);
-      ctx.postMessage({ type: 'ready', shape: shape.slice(1).join('x') });
+      const input = model.getInputDetails()[0];
+      const outputs = model.getOutputDetails();
+      ctx.postMessage({
+        type: 'ready',
+        metadata: {
+          ...msg.metadata,
+          input: { shape: shape.map(Number), dtype: String(input.dtype) },
+          outputs: outputs.map((output) => ({ shape: Array.from(output.shape).map(Number), dtype: String(output.dtype) })),
+          source: 'manifest+runtime',
+        },
+        shape: shape.slice(1).join('x'),
+      });
     } catch (err) {
       ctx.postMessage({
         type: 'error',
@@ -56,7 +74,7 @@ ctx.onmessage = async (event: MessageEvent) => {
   } else if (msg.type === 'infer') {
     try {
       if (!model) throw new Error('Modelo no cargado');
-      const detections = await inferBitmap(model, msg.bitmap);
+      const detections = await inferBitmap(model, msg.bitmap, modelMetadata);
       ctx.postMessage({ type: 'result', id: msg.id, detections });
     } catch (err) {
       ctx.postMessage({
@@ -71,7 +89,7 @@ ctx.onmessage = async (event: MessageEvent) => {
   }
 };
 
-async function inferBitmap(model: CompiledModel, bitmap: ImageBitmap): Promise<Detection[]> {
+async function inferBitmap(model: CompiledModel, bitmap: ImageBitmap, metadata: ModelMetadata | null): Promise<Detection[]> {
   const imgW = bitmap.width;
   const imgH = bitmap.height;
   const inputShape = Array.from(model.getInputDetails()[0].shape);
@@ -87,14 +105,15 @@ async function inferBitmap(model: CompiledModel, bitmap: ImageBitmap): Promise<D
     outputs[0].delete();
 
     const outputShape = Array.from(model.getOutputDetails()[0].shape);
-    return parseYoloOutput(
+    return parseModelOutput(
       new Float32Array(outputData),
       outputShape,
       imgW,
       imgH,
       targetW,
       targetH,
-      pad
+      pad,
+      metadata
     );
   } finally {
     inputTensor.delete();
@@ -140,6 +159,125 @@ function letterbox(
   }
 
   return { pixels, pad };
+}
+
+function parseModelOutput(
+  data: Float32Array,
+  shape: number[],
+  imgW: number,
+  imgH: number,
+  modelW: number,
+  modelH: number,
+  pad: PadInfo,
+  metadata: ModelMetadata | null
+): Detection[] {
+  if (metadata?.task === 'pose') {
+    return parsePoseOutput(data, shape, imgW, imgH, modelW, modelH, pad, metadata);
+  }
+  return parseYoloOutput(data, shape, imgW, imgH, modelW, modelH, pad);
+}
+
+function parsePoseOutput(
+  data: Float32Array,
+  shape: number[],
+  imgW: number,
+  imgH: number,
+  modelW: number,
+  modelH: number,
+  pad: PadInfo,
+  metadata: ModelMetadata
+): Detection[] {
+  const detections: Detection[] = [];
+  const confidenceThreshold = 0.25;
+  const keypointCount = metadata.kptShape?.[0] ?? 17;
+  const keypointDimensions = metadata.kptShape?.[1] ?? 3;
+  const classCount = Math.max(1, metadata.classCount || 1);
+  const expectedRawChannels = 4 + classCount + keypointCount * keypointDimensions;
+  const expectedEndToEndColumns = 6 + keypointCount * keypointDimensions;
+
+  const addRaw = (candidate: number[], keypointValues: number[]) => {
+    const cx = candidate[0];
+    const cy = candidate[1];
+    const w = candidate[2];
+    const h = candidate[3];
+    let classId = 0;
+    let score = 0;
+    for (let c = 0; c < classCount; c++) {
+      if (candidate[4 + c] > score) {
+        score = candidate[4 + c];
+        classId = c;
+      }
+    }
+    if (score < confidenceThreshold) return;
+    detections.push({
+      ...scaleBox(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2, score, classId, imgW, imgH, modelW, modelH, pad),
+      keypoints: decodeKeypoints(keypointValues, keypointDimensions, keypointCount, imgW, imgH, modelW, modelH, pad, metadata),
+    });
+  };
+
+  const addEndToEnd = (row: number[]) => {
+    const confidence = row[4];
+    if (confidence < confidenceThreshold) return;
+    const classId = Math.round(row[5]);
+    detections.push({
+      ...scaleBox(row[0], row[1], row[2], row[3], confidence, classId, imgW, imgH, modelW, modelH, pad),
+      keypoints: decodeKeypoints(row.slice(6), keypointDimensions, keypointCount, imgW, imgH, modelW, modelH, pad, metadata),
+    });
+  };
+
+  if (shape.length === 3) {
+    const dim1 = shape[1];
+    const dim2 = shape[2];
+    if (dim2 === expectedEndToEndColumns || dim2 === 6) {
+      for (let i = 0; i < dim1; i++) addEndToEnd(Array.from(data.slice(i * dim2, (i + 1) * dim2)));
+    } else if (dim1 === expectedRawChannels || dim1 === 4 + classCount + keypointCount * 2) {
+      for (let i = 0; i < dim2; i++) {
+        const candidate = [];
+        for (let c = 0; c < 4 + classCount; c++) candidate.push(data[c * dim2 + i]);
+        const keypoints = [];
+        const base = (4 + classCount) * dim2 + i;
+        for (let k = 0; k < keypointCount * keypointDimensions; k++) {
+          keypoints.push(data[(4 + classCount + k) * dim2 + i]);
+        }
+        addRaw(candidate, keypoints.length ? keypoints : Array.from(data.slice(base, base + keypointCount * keypointDimensions)));
+      }
+    }
+  } else if (shape.length === 2) {
+    const rows = shape[0];
+    const cols = shape[1];
+    for (let i = 0; i < rows; i++) {
+      const row = Array.from(data.slice(i * cols, (i + 1) * cols));
+      if (cols === expectedEndToEndColumns || cols === 6) addEndToEnd(row);
+      else if (cols === expectedRawChannels) addRaw(row.slice(0, 4 + classCount), row.slice(4 + classCount));
+    }
+  }
+
+  return nms(detections, 0.45);
+}
+
+function decodeKeypoints(
+  values: number[],
+  dimensions: number,
+  count: number,
+  imgW: number,
+  imgH: number,
+  modelW: number,
+  modelH: number,
+  pad: PadInfo,
+  metadata: ModelMetadata
+): Keypoint[] {
+  const keypoints: Keypoint[] = [];
+  for (let i = 0; i < count; i++) {
+    const offset = i * dimensions;
+    const point = scalePoint(values[offset], values[offset + 1], imgW, imgH, modelW, modelH, pad);
+    keypoints.push({
+      x: point.x,
+      y: point.y,
+      confidence: dimensions > 2 ? values[offset + 2] : undefined,
+      name: metadata.kptNames?.[i],
+    });
+  }
+  return keypoints;
 }
 
 function parseYoloOutput(
@@ -264,6 +402,23 @@ function scaleBox(
     height: by2 - by1,
     confidence,
     classId,
+  };
+}
+
+function scalePoint(
+  x: number,
+  y: number,
+  imgW: number,
+  imgH: number,
+  modelW: number,
+  modelH: number,
+  pad: PadInfo
+): { x: number; y: number } {
+  const scaleX = imgW / (modelW - pad.left - pad.right);
+  const scaleY = imgH / (modelH - pad.top - pad.bottom);
+  return {
+    x: Math.max(0, Math.min(imgW, (x - pad.left) * scaleX)),
+    y: Math.max(0, Math.min(imgH, (y - pad.top) * scaleY)),
   };
 }
 

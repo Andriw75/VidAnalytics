@@ -11,8 +11,9 @@ import {
   OnDestroy,
 } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { Detection } from '../detection';
+import { Detection, ModelMetadata } from '../detection';
 import { InferenceService } from '../inference.service';
+import { poseLegend } from '../pose-renderer';
 
 export interface SessionFrame {
   index: number;
@@ -34,6 +35,7 @@ export class SessionPlayerComponent implements OnDestroy {
 
   title = input('');
   frames = input<SessionFrame[]>([]);
+  metadata = input<ModelMetadata | null>(null);
 
   close = output<void>();
 
@@ -44,6 +46,7 @@ export class SessionPlayerComponent implements OnDestroy {
   speedInput = signal('1');
 
   readonly speeds = SPEEDS;
+  readonly poseColors = poseLegend();
 
   private canvasRef = viewChild<ElementRef<HTMLCanvasElement>>('canvas');
   private imageCache = new Map<number, HTMLImageElement>();

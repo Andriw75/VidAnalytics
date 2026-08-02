@@ -11,9 +11,9 @@
 
     <div class="control-group">
       <label for="modelSelect">Modelo:</label>
-      <select id="modelSelect" [value]="selectedModel" (change)="onModelChange($event)">
-        @for (m of models; track m) {
-          <option [value]="m">{{ m }}</option>
+      <select id="modelSelect" [value]="selectedModel" (change)="onModelChange($event)" [disabled]="isLoading">
+        @for (m of models; track m.file) {
+          <option [value]="m.file">{{ m.label }}</option>
         }
       </select>
     </div>
@@ -31,6 +31,20 @@
       </button>
     }
   </div>
+
+  @if (selectedModelMetadata) {
+    <div class="model-metadata">
+      <div class="model-metadata-title">{{ selectedModelMetadata.label }}</div>
+      <div class="model-metadata-grid">
+        <span>Tarea</span><strong>{{ taskLabel(selectedModelMetadata.task) }}</strong>
+        <span>Entrada</span><strong>{{ inputShapeLabel(selectedModelMetadata) }}</strong>
+        <span>Clases</span><strong>{{ selectedModelMetadata.classCount }}</strong>
+        <span>Keypoints</span><strong>{{ selectedModelMetadata.kptShape ? selectedModelMetadata.kptShape[0] : 'No' }}</strong>
+        <span>Head</span><strong>{{ selectedModelMetadata.head || '—' }}</strong>
+        <span>Metadata</span><strong>{{ selectedModelMetadata.source }}</strong>
+      </div>
+    </div>
+  }
 
   <div class="status-bar">
     <span [class.loading]="isLoading || processing">{{ status }}</span>
@@ -214,6 +228,7 @@
           <app-session-player
             [title]="selectedSession.name"
             [frames]="sessionFrames"
+            [metadata]="selectedSession.modelMetadata ?? null"
             (close)="closeSession()"
           ></app-session-player>
         </div>

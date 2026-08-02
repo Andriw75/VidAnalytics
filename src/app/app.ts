@@ -3,7 +3,7 @@ import { VideoStoreService, VideoSession } from './video-store.service';
 import { InferenceService } from './inference.service';
 import { VideoExtractionService, ProgressStats } from './video-extraction.service';
 import { SessionPlayerComponent, SessionFrame } from './session-player/session-player';
-import { Detection, VideoMeta } from './detection';
+import { Detection, ModelMetadata, VideoMeta } from './detection';
 
 @Component({
   selector: 'app-root',
@@ -18,7 +18,8 @@ export class App implements AfterViewInit, OnDestroy {
 
   imageUrl: string | null = null;
   selectedModel = 'yolo26n.tflite';
-  models = ['yolo26n.tflite'];
+  models: ModelMetadata[] = [];
+  selectedModelMetadata: ModelMetadata | null = null;
   status = 'Inicializando LiteRT...';
   isLoading = true;
   detections: Detection[] = [];
@@ -58,6 +59,7 @@ export class App implements AfterViewInit, OnDestroy {
       await this.inference.init();
       this.status = 'LiteRT listo. Cargando modelo...';
       this.cdr.detectChanges();
+      await this.loadModelManifest();
       await this.loadModel();
     } catch (err) {
       this.status = `Error al iniciar LiteRT: ${err}`;
@@ -68,8 +70,11 @@ export class App implements AfterViewInit, OnDestroy {
 
   async loadModel() {
     try {
-      const shape = await this.inference.loadModel(this.selectedModel);
-      this.status = `Modelo listo (entrada: ${shape}). Selecciona una imagen.`;
+      const descriptor = this.models.find((model) => model.file === this.selectedModel);
+      if (!descriptor) throw new Error(`Modelo no registrado: ${this.selectedModel}`);
+      this.selectedModelMetadata = await this.inference.loadModel(this.selectedModel, descriptor);
+      const shape = this.selectedModelMetadata.input?.shape.slice(1).join('x') ?? 'desconocida';
+      this.status = `Modelo listo (entrada: ${shape}, tarea: ${this.taskLabel(this.selectedModelMetadata.task)}). Selecciona una imagen.`;
       this.isLoading = false;
       this.loadSessions();
       this.cdr.detectChanges();
@@ -78,6 +83,31 @@ export class App implements AfterViewInit, OnDestroy {
       this.isLoading = false;
       this.cdr.detectChanges();
     }
+  }
+
+  private async loadModelManifest() {
+    const response = await fetch('/models/models.json');
+    if (!response.ok) throw new Error('No se pudo cargar models.json');
+    const models = (await response.json()) as ModelMetadata[];
+    this.models = models.map((model) => ({ ...model, source: 'manifest' }));
+    if (!this.models.some((model) => model.file === this.selectedModel)) {
+      this.selectedModel = this.models[0]?.file ?? '';
+    }
+  }
+
+  taskLabel(task: ModelMetadata['task']): string {
+    return {
+      detect: 'Detección',
+      pose: 'Pose',
+      segment: 'Segmentación',
+      classify: 'Clasificación',
+      obb: 'Orientación',
+      unknown: 'Desconocida',
+    }[task];
+  }
+
+  inputShapeLabel(metadata: ModelMetadata): string {
+    return metadata.input?.shape.slice(1).join(' × ') || '—';
   }
 
   async onModelChange(event: Event) {
@@ -294,6 +324,9 @@ export class App implements AfterViewInit, OnDestroy {
           salto: this.salto,
           count: frames.length,
           thumbnail,
+          modelFile: this.selectedModel,
+          modelTask: this.selectedModelMetadata?.task,
+          modelMetadata: this.selectedModelMetadata ?? undefined,
         };
         try {
           await this.store.saveSession(session, frames);

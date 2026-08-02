@@ -82,6 +82,28 @@
   font-size: 14px;
 }
 
+.poseLegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  padding: 8px 14px;
+  background: #141d28;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+
+.poseLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.poseLegend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
 .controlsBar {
   display: flex;
   align-items: center;
