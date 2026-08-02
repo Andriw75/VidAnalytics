@@ -226,6 +226,15 @@ export class App implements AfterViewInit, OnDestroy {
     return this.inference.cocoClass(classId);
   }
 
+  sessionBlobSize(session: VideoSession): { width: number; height: number } {
+    const maxDim = 640;
+    const scale = Math.min(1, maxDim / Math.max(session.width, session.height));
+    return {
+      width: Math.max(1, Math.round(session.width * scale)),
+      height: Math.max(1, Math.round(session.height * scale)),
+    };
+  }
+
   private formatInferProgress(done: number, total: number, stats?: ProgressStats): string {
     const pct = total > 0 ? (done >= total ? 100 : Math.floor((done / total) * 100)) : 0;
     let line = `Infiriendo ${done}/${total} (${pct}%)`;

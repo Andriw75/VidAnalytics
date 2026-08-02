@@ -229,6 +229,7 @@
             [title]="selectedSession.name"
             [frames]="sessionFrames"
             [metadata]="selectedSession.modelMetadata ?? null"
+            [imageSize]="sessionBlobSize(selectedSession)"
             (close)="closeSession()"
           ></app-session-player>
         </div>

@@ -5,11 +5,166 @@
       <span class="frameCounter">{{ currentIdx() + 1 }} / {{ totalFrames() }}</span>
       <span class="frameTime">{{ currentFrameLabel }}</span>
     </div>
-    <button class="btnClose" (click)="onClose()" title="Cerrar">&times;</button>
+    <div class="headerActions">
+      <button class="ctrlBtn filterBtn" [class.active]="showFilters()" (click)="toggleFilters()" title="Filtros">
+        &#9881;
+      </button>
+      <button class="btnClose" (click)="onClose()" title="Cerrar">&times;</button>
+    </div>
   </div>
 
+  @if (showFilters()) {
+    <div class="filterPanel">
+      <div class="filterSection">
+        <div class="filterTitle">Bounding boxes</div>
+        <label class="filterRow">
+          <input type="checkbox" [checked]="bboxFilter().enabled" (change)="onBboxEnabledChange($event)" />
+          Activar
+        </label>
+        <div class="filterRow">
+          <span>Clase</span>
+          <select [value]="bboxFilter().classId" (change)="onClassChange($event)">
+            <option value="all">Todas</option>
+            @for (classId of classOptions(); track classId) {
+              <option [value]="classId">{{ cocoClass(classId) }}</option>
+            }
+          </select>
+        </div>
+        <div class="filterRow">
+          <span>Mín. entidades</span>
+          <input type="number" min="0" [value]="bboxFilter().minCount" (change)="onMinCountChange($event)" />
+        </div>
+        <div class="filterRow">
+          <span>Máx. entidades</span>
+          <input type="number" min="0" [value]="bboxFilter().maxCount ?? ''" (change)="onMaxCountChange($event)" placeholder="Sin límite" />
+        </div>
+        <div class="filterRow">
+          <span>Confianza mín.</span>
+          <input type="number" min="0" max="1" step="0.05" [value]="bboxFilter().minConfidence" (change)="onMinConfChange($event)" />
+        </div>
+        <div class="filterRow">
+          <span>Zona</span>
+          <select [value]="bboxFilter().zoneMode" (change)="onZoneModeChange($event)">
+            <option value="none">Sin zona</option>
+            <option value="center">Centro dentro</option>
+            <option value="intersect">Intersecta</option>
+            <option value="area">Área cubierta</option>
+          </select>
+        </div>
+        @if (bboxFilter().zoneMode === 'area') {
+          <div class="filterRow">
+            <span>Área mín. (%)</span>
+            <input type="number" min="0" max="100" [value]="Math.round(bboxFilter().minZoneArea * 100)" (change)="onMinZoneAreaChange($event)" />
+          </div>
+        }
+      </div>
+
+      @if (isPose()) {
+        <div class="filterSection">
+          <div class="filterTitle">Keypoints (pose)</div>
+          <label class="filterRow">
+            <input type="checkbox" [checked]="keypointFilter().enabled" (change)="onKptEnabledChange($event)" />
+            Activar
+          </label>
+          <div class="filterRow">
+            <span>Mín. visibles</span>
+            <input type="number" min="0" max="17" [value]="keypointFilter().minVisible" (change)="onMinVisibleChange($event)" />
+          </div>
+          <div class="filterRow">
+            <span>Postura</span>
+            <select [value]="keypointFilter().preset" (change)="onPresetChange($event)">
+              <option value="none">Cualquiera</option>
+              <option value="armsUp">Brazos levantados</option>
+              <option value="armsDown">Brazos abajo</option>
+            </select>
+          </div>
+          <div class="filterRow">
+            <span>Zona keypoint</span>
+            <select [value]="keypointFilter().zoneMode" (change)="onKptZoneModeChange($event)">
+              <option value="none">Sin zona</option>
+              <option value="any">Cualquier keypoint</option>
+              <option value="named">Keypoint específico</option>
+            </select>
+          </div>
+          @if (keypointFilter().zoneMode === 'named') {
+            <div class="filterRow">
+              <span>Keypoint</span>
+              <select [value]="keypointFilter().zoneKeypoint ?? ''" (change)="onKptNameChange($event)">
+                <option value="">Seleccionar</option>
+                @for (name of metadata()?.kptNames ?? []; track name) {
+                  <option [value]="name">{{ name }}</option>
+                }
+              </select>
+            </div>
+          }
+        </div>
+      }
+
+      <div class="filterSection">
+        <div class="filterTitle">Zonas restringidas</div>
+        <p class="filterHint">Dibuja o agrega una zona. Al crear una, el filtro "Zona" de bounding boxes se activa en modo "Intersecta".</p>
+        @if (zones().length === 0) {
+          <p class="filterHint">Sin zonas. Agrega o dibuja una para restringir la búsqueda.</p>
+        }
+        @for (zone of zones(); track zone.id) {
+          <div class="zoneRow">
+            <input type="checkbox" [checked]="zone.enabled" (change)="toggleZone(zone.id)" />
+            <span class="zoneName">{{ zone.name }}</span>
+            <button class="miniBtn" (click)="removeZone(zone.id)" title="Eliminar">&times;</button>
+          </div>
+        }
+        @if (bboxFilter().zoneMode !== 'none' && !hasEnabledZones()) {
+          <p class="filterWarn">El modo "Zona" está activo pero no hay zonas habilitadas: la búsqueda no devolverá resultados.</p>
+        }
+        <div class="filterActions">
+          <button class="filterActionBtn" (click)="addZone()">Agregar zona</button>
+          <button class="filterActionBtn" [class.active]="editingZone()" (click)="toggleEditZone()">
+            {{ editingZone() ? 'Dibujando... clic y arrastra sobre el video' : 'Dibujar zona' }}
+          </button>
+        </div>
+      </div>
+
+      <div class="filterActions">
+        <button class="searchBtn" (click)="runSearch()">Buscar coincidencias</button>
+        @if (eventCount() > 0) {
+          <span class="searchSummary">{{ eventCount() }} evento(s)</span>
+        }
+      </div>
+
+      @if (result(); as searchResult) {
+        @if (searchResult.events.length > 0) {
+          <div class="resultsList">
+            <div class="resultsHeader">
+              <button class="miniBtn" (click)="prevEvent()">&#9664;</button>
+              <span>{{ currentEventIdx() + 1 }} / {{ searchResult.events.length }}</span>
+              <button class="miniBtn" (click)="nextEvent()">&#9654;</button>
+            </div>
+            @for (event of searchResult.events; track event.startFrame) {
+              <div class="eventRow" [class.active]="selectedEvent() === event" (click)="selectEvent(event)">
+                <span class="eventDot" [style.background]="event.color"></span>
+                <span class="eventTime">{{ formatDuration(event.startTime) }} – {{ formatDuration(event.endTime) }}</span>
+                <span class="eventReason">{{ event.primaryReason }}</span>
+                <span class="eventCount">{{ event.frames.length }}</span>
+              </div>
+            }
+          </div>
+        } @else {
+          <p class="filterHint">No se encontraron coincidencias con los filtros actuales.</p>
+        }
+      }
+    </div>
+  }
+
   <div class="imageWrapper">
-    <canvas #canvas class="mainCanvas"></canvas>
+    <canvas
+      #canvas
+      class="mainCanvas"
+      [class.zoneEditing]="editingZone()"
+      (pointerdown)="onZonePointerDown($event)"
+      (pointermove)="onZonePointerMove($event)"
+      (pointerup)="onZonePointerUp()"
+      (pointerleave)="onZonePointerUp()"
+    ></canvas>
     @if (totalFrames() === 0) {
       <div class="empty">Sin fotogramas</div>
     }
@@ -19,6 +174,17 @@
     <div class="poseLegend">
       @for (item of poseColors; track item.label) {
         <span><i [style.background]="item.color"></i>{{ item.label }}</span>
+      }
+    </div>
+  }
+
+  @if (selectedEvent(); as event) {
+    <div class="activeEventBar">
+      <span class="eventDot" [style.background]="event.color"></span>
+      <span>{{ event.primaryReason }}</span>
+      <span class="eventTime">Frame {{ event.startFrame + 1 }}–{{ event.endFrame + 1 }}</span>
+      @if (currentFrameSuggestions() > 0) {
+        <span class="eventCount">{{ currentFrameSuggestions() }} coincidencia(s) en este frame</span>
       }
     </div>
   }
@@ -73,4 +239,18 @@
       />
     </div>
   </div>
+
+  @if (eventCount() > 0) {
+    <div class="eventMarkers">
+      @for (event of result()!.events; track event.startFrame) {
+        <button
+          class="eventMarker"
+          [style.background]="event.color"
+          [class.active]="selectedEvent() === event"
+          (click)="selectEvent(event)"
+          [title]="event.primaryReason + ' · ' + formatDuration(event.startTime)"
+        ></button>
+      }
+    </div>
+  }
 </div>
