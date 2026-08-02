@@ -16,6 +16,7 @@ export interface ExtractionEstimate {
 export interface ExtractionOptions {
   infer?: (blob: Blob) => Promise<Detection[]>;
   onProgress?: (done: number, total: number) => void;
+  onInferProgress?: (done: number, total: number) => void;
   shouldCancel?: () => boolean;
 }
 
@@ -37,6 +38,136 @@ export class VideoExtractionService {
       return { fpsKept: meta.fps / stride, count: Math.ceil(tf / stride) };
     }
     return { fpsKept: null, count: Math.ceil(meta.duration * stride) };
+  }
+
+  /**
+   * Método unificado de extracción. Usa WebCodecs (VideoDecoder + mp4box)
+   * cuando es posible (máxima velocidad, frame-exacto); si no, cae a la
+   * reproducción del <video> a la máxima velocidad permitida.
+   */
+  async extract(
+    file: File | null,
+    video: HTMLVideoElement,
+    meta: VideoMeta,
+    salto: number,
+    opts: ExtractionOptions = {}
+  ): Promise<ExtractedFrame[]> {
+    let useWebCodecs = false;
+    if (
+      file &&
+      typeof VideoDecoder !== 'undefined' &&
+      typeof Worker !== 'undefined' &&
+      typeof OffscreenCanvas !== 'undefined'
+    ) {
+      useWebCodecs = await this.isMp4(file);
+    }
+    if (useWebCodecs) {
+      return this.extractWebCodecs(file!, meta, salto, opts);
+    }
+    return this.extractByPlayback(video, meta, salto, opts);
+  }
+
+  private async extractWebCodecs(
+    file: File,
+    meta: VideoMeta,
+    salto: number,
+    opts: ExtractionOptions = {}
+  ): Promise<ExtractedFrame[]> {
+    const stride = Math.max(1, Math.round(salto));
+    const buffer = await file.arrayBuffer();
+    const mime = this.captureMime;
+    const quality = this.captureQuality;
+    const estimate = this.estimate(meta, stride);
+
+    return new Promise<ExtractedFrame[]>((resolve, reject) => {
+      const worker = new Worker(new URL('./frame-extract.worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      const byIndex = new Map<number, ExtractedFrame>();
+      let expectedTotal = 0;
+      let terminated = false;
+
+      const timeout = window.setTimeout(() => {
+        terminated = true;
+        worker.terminate();
+        reject(new Error('Timeout en la extracción'));
+      }, 120000);
+
+      worker.onerror = (event) => {
+        window.clearTimeout(timeout);
+        terminated = true;
+        worker.terminate();
+        reject(new Error(`Error del worker: ${event.message}`));
+      };
+
+      worker.onmessageerror = () => {
+        window.clearTimeout(timeout);
+        terminated = true;
+        worker.terminate();
+        reject(new Error('Error de mensaje en el worker'));
+      };
+
+      worker.onmessage = async (event) => {
+        if (terminated) return;
+        const msg = event.data;
+
+        switch (msg.type) {
+          case 'meta':
+            expectedTotal = msg.totalFrames;
+            break;
+
+          case 'frame': {
+            const blob = new Blob([msg.buffer], { type: mime });
+            byIndex.set(msg.index, {
+              index: msg.index,
+              timestamp: msg.timestamp,
+              blob,
+            });
+            const total = expectedTotal > 0 ? Math.ceil(expectedTotal / stride) : estimate.count;
+            opts.onProgress?.(byIndex.size, total);
+            break;
+          }
+
+          case 'done': {
+            window.clearTimeout(timeout);
+            const ordered = [...byIndex.values()].sort((a, b) => a.index - b.index);
+            try {
+              if (opts.infer && !opts.shouldCancel?.()) {
+                for (let i = 0; i < ordered.length; i++) {
+                  if (opts.shouldCancel?.()) break;
+                  ordered[i].detections = await opts.infer(ordered[i].blob);
+                  opts.onInferProgress?.(i + 1, ordered.length);
+                }
+              }
+            } catch (err) {
+              worker.terminate();
+              reject(err);
+              return;
+            }
+            worker.terminate();
+            resolve(ordered);
+            break;
+          }
+
+          case 'error':
+            window.clearTimeout(timeout);
+            worker.terminate();
+            reject(new Error(msg.message));
+            break;
+        }
+      };
+
+      worker.postMessage({ type: 'start', buffer, stride, maxDim: 640, mime, quality }, [buffer]);
+    });
+  }
+
+  private async isMp4(file: File): Promise<boolean> {
+    try {
+      const buf = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+      return String.fromCharCode(buf[4], buf[5], buf[6], buf[7]) === 'ftyp';
+    } catch {
+      return false;
+    }
   }
 
   async getAccurateDuration(video: HTMLVideoElement): Promise<number> {
@@ -126,15 +257,14 @@ export class VideoExtractionService {
   }
 
   /**
-   * Extrae fotogramas reproduciendo el video a alta velocidad en lugar de
-   * hacer un "seek" por cada frame. Captura cuando currentTime cruza cada
-   * instante objetivo (derivado del salto). Opcionalmente infiere por frame.
+   * Extracción por reproducción (fallback): reproduce el video a la máxima
+   * velocidad que el navegador permita y captura cuando currentTime cruza
+   * cada instante objetivo (derivado del salto).
    */
   async extractByPlayback(
     video: HTMLVideoElement,
     meta: VideoMeta,
     salto: number,
-    playbackRate: number,
     opts: ExtractionOptions = {}
   ): Promise<ExtractedFrame[]> {
     const stride = Math.max(1, Math.round(salto));
@@ -150,8 +280,8 @@ export class VideoExtractionService {
     canvas.height = Math.max(1, Math.round(meta.height * scale));
     const ctx = canvas.getContext('2d')!;
 
-    const mime = this.supportsWebp ? 'image/webp' : 'image/jpeg';
-    const quality = this.supportsWebp ? 0.82 : 0.85;
+    const mime = this.captureMime;
+    const quality = this.captureQuality;
 
     const captureBlob = (): Promise<Blob | null> =>
       new Promise((resolve) => canvas.toBlob(resolve, mime, quality));
@@ -266,12 +396,29 @@ export class VideoExtractionService {
 
     video.pause();
     video.muted = true;
-    video.playbackRate = playbackRate;
+    video.playbackRate = this.maxPlaybackRate(video);
     video.currentTime = 0;
     video.play().catch(() => void finish());
     step();
 
     return done;
+  }
+
+  private get captureMime(): string {
+    return this.supportsWebp ? 'image/webp' : 'image/jpeg';
+  }
+
+  private get captureQuality(): number {
+    return this.supportsWebp ? 0.82 : 0.85;
+  }
+
+  private maxPlaybackRate(video: HTMLVideoElement): number {
+    try {
+      video.playbackRate = 16;
+      return video.playbackRate > 0 ? video.playbackRate : 16;
+    } catch {
+      return 16;
+    }
   }
 
   private detectWebp(): boolean {

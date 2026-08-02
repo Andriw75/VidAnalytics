@@ -31,9 +31,9 @@ export class App implements AfterViewInit, OnDestroy {
   videoMeta: VideoMeta | null = null;
   videoLoading = false;
 
+  private videoFile: File | null = null;
+
   salto = 15;
-  extractSpeed = 8;
-  extractSpeedOptions = [4, 8, 16];
   applyInference = false;
   extractEstimate: { fpsKept: number | null; count: number } | null = null;
   extracting = false;
@@ -109,6 +109,7 @@ export class App implements AfterViewInit, OnDestroy {
     const file = input.files?.[0];
     if (!file) return;
     input.value = '';
+    this.videoFile = file;
     if (this.videoUrl) URL.revokeObjectURL(this.videoUrl);
     if (this.videoRef) this.videoRef.nativeElement.pause();
     this.videoUrl = URL.createObjectURL(file);
@@ -164,11 +165,6 @@ export class App implements AfterViewInit, OnDestroy {
     this.computeExtractEstimate();
   }
 
-  onExtractSpeedChange(event: Event) {
-    const select = event.target as HTMLSelectElement;
-    this.extractSpeed = Number(select.value);
-  }
-
   onApplyInferenceChange(event: Event) {
     const input = event.target as HTMLInputElement;
     this.applyInference = input.checked;
@@ -220,17 +216,22 @@ export class App implements AfterViewInit, OnDestroy {
         ? (blob: Blob) => this.inference.inferBlob(blob)
         : undefined;
 
-      const frames = await this.extractSvc.extractByPlayback(
+      const frames = await this.extractSvc.extract(
+        this.videoFile,
         video,
         meta,
         this.salto,
-        this.extractSpeed,
         {
           infer: inferFn,
           onProgress: (done, total) => {
             this.extractProgress = { done, total };
             this.extractStatus =
               `Extrayendo ${done}/${total}` + (this.applyInference ? ' (infiriendo...)' : '');
+            this.cdr.detectChanges();
+          },
+          onInferProgress: (done, total) => {
+            this.extractProgress = { done, total };
+            this.extractStatus = `Infiriendo ${done}/${total}`;
             this.cdr.detectChanges();
           },
           shouldCancel: () => this.extractAbort,

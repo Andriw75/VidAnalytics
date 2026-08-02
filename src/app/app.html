@@ -131,17 +131,6 @@
               />
             </div>
             <div class="extract-row">
-              <label class="extract-label" for="extractSpeed">Velocidad de extracción:</label>
-              <select
-                id="extractSpeed"
-                [value]="extractSpeed"
-                (change)="onExtractSpeedChange($event)"
-                [disabled]="extracting"
-              >
-                @for (s of extractSpeedOptions; track s) {
-                  <option [value]="s">{{ s }}x</option>
-                }
-              </select>
               <label class="checkbox-label">
                 <input
                   type="checkbox"
